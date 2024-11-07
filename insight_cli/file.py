@@ -1,17 +1,15 @@
 import click
 import requests
 import logging
-import ssl
-import urllib.parse
-import json
-from pika import BlockingConnection, ConnectionParameters, SSLOptions, PlainCredentials
+import os
 from minio import Minio
 from xml.etree import ElementTree
 from tqdm import tqdm
 from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
-from .config import config
-from .oauth import client, get_token
+from urllib.parse import urlparse
+from .config import get_option
+from .oauth import get_client, get_token
 
 
 @click.group()
@@ -23,7 +21,8 @@ def file():
 @file.command()
 def list():
     """List uploaded PDF files."""
-    res = client.get(f"{config['api']['endpoint']}/api/v1/files")
+    client = get_client()
+    res = client.get(os.path.join(get_option("api", "endpoint"), "inodes"))
     print(res.text)
 
 
@@ -45,11 +44,12 @@ def load_file(path):
 @click.argument("files", nargs=-1, type=click.Path(path_type=Path))
 def upload(files):
     """Ingest PDF files"""
+    client = get_client()
 
     for path in files:
         res = client.post(
-            f"{config['api']['endpoint']}/api/v1/files",
-            data={"name": path.name},
+            os.path.join(get_option("api", "endpoint"), "inodes"),
+            data={"name": path.name, "type": "file"},
             headers={"Prefer": "return=representation"},
         )
 
@@ -57,7 +57,7 @@ def upload(files):
             logging.error(res.text)
             exit(1)
 
-        file = res.json()[0]
+        inode = res.json()[0]
         size = path.stat().st_size
 
         with open(path, "rb") as f:
@@ -73,7 +73,7 @@ def upload(files):
 
                 # Get storage keys in exchange for JWT
                 res = requests.post(
-                    f"https://{config['storage']['endpoint']}",
+                    get_option("storage", "sts-endpoint"),
                     data={
                         "Action": "AssumeRoleWithWebIdentity",
                         "Version": "2011-06-15",
@@ -82,21 +82,6 @@ def upload(files):
                     },
                 )
 
-                # Connect first, as upload could take long, and access_token is
-                # only valid for a short while
-                # TODO - Proper token refresh logic
-                context = ssl.create_default_context()
-                parameters = ConnectionParameters(
-                    ssl_options=SSLOptions(context),
-                    host=config["rabbitmq"]["host"],
-                    credentials=PlainCredentials(
-                        "username", urllib.parse.quote(access_token)
-                    ),
-                )
-
-                connection = BlockingConnection(parameters)
-                channel = connection.channel()
-
                 tree = ElementTree.fromstring(res.content)
                 ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
                 credentials = tree.find(
@@ -104,8 +89,10 @@ def upload(files):
                 )
 
                 # Upload file to storage backend
+                url = urlparse(get_option("storage", "endpoint"))
                 minio = Minio(
-                    config["storage"]["endpoint"],
+                    url.netloc,
+                    secure=url.scheme == "https",
                     access_key=credentials.find("s3:AccessKeyId", ns).text,
                     secret_key=credentials.find("s3:SecretAccessKey", ns).text,
                     session_token=credentials.find("s3:SessionToken", ns).text,
@@ -113,31 +100,18 @@ def upload(files):
                 )
 
                 minio.put_object(
-                    config["storage"]["bucket"],
-                    file["path"],
+                    get_option("storage", "bucket"),
+                    f"/users/{inode['owner_id']}{inode['path']}/original",
                     reader_wrapper,
                     size,
                     content_type="application/pdf",
                 )
 
-                # Trigger ingest of file
-                channel.basic_publish(
-                    exchange="insight",
-                    routing_key="analyze_file",
-                    body=json.dumps({"id": file["id"]}),
-                )
-
                 res = client.patch(
-                    f"{config['api']['endpoint']}/api/v1/files?id=eq.{file['id']}",
+                    os.path.join(get_option("api", "endpoint"), "inodes")
+                    + f"?id=eq.{inode['id']}",
                     data={"is_uploaded": True},
                 )
                 if res.status_code != 204:
                     logging.error(res.text)
                     exit(1)
-
-                # Trigger ingest of file
-                channel.basic_publish(
-                    exchange=f"user-{file['owner_id']}",
-                    routing_key="upload_file",
-                    body=json.dumps({"id": file["id"]}),
-                )

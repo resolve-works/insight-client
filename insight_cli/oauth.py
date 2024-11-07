@@ -4,12 +4,12 @@ import keyring
 import webbrowser
 import requests
 import logging
+import os
 from pathlib import Path
-from .config import config
 from oauthlib.oauth2 import DeviceClient
 from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
 from requests_oauthlib import OAuth2Session
-
+from .config import get_option
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -47,21 +47,22 @@ def delete_token():
         return None
 
 
-client = OAuth2Session(
-    client_id=config["auth"]["client-id"],
-    token=get_token(),
-    auto_refresh_url=config["auth"]["token-endpoint"],
-    auto_refresh_kwargs={
-        "client_id": config["auth"]["client-id"],
-    },
-    token_updater=set_token,
-)
+def get_client():
+    return OAuth2Session(
+        client_id=get_option("oidc", "client-id"),
+        token=get_token(),
+        auto_refresh_url=os.path.join(get_option("oidc", "endpoint"), "token"),
+        auto_refresh_kwargs={
+            "client_id": get_option("oidc", "client-id"),
+        },
+        token_updater=set_token,
+    )
 
 
 def authorize_device():
     res = requests.post(
-        config["auth"]["device-endpoint"],
-        data={"client_id": config["auth"]["client-id"]},
+        os.path.join(get_option("oidc", "endpoint"), "auth", "device"),
+        data={"client_id": get_option("oidc", "client-id")},
     )
     body = res.json()
 
@@ -73,11 +74,11 @@ def authorize_device():
 
     until_time = time.time() + body["expires_in"]
     while until_time > time.time():
-        client = DeviceClient(config["auth"]["client-id"])
+        client = DeviceClient(get_option("oidc", "client-id"))
         try:
             token = OAuth2Session(client=client).fetch_token(
-                client_id=config["auth"]["client-id"],
-                token_url=config["auth"]["token-endpoint"],
+                client_id=get_option("oidc", "client-id"),
+                token_url=os.path.join(get_option("oidc", "endpoint"), "token"),
                 device_code=body["device_code"],
             )
             set_token(token)
