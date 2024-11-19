@@ -20,6 +20,7 @@ keys = [
     ("oidc", "client-id"),
     ("oidc", "client-secret"),
     ("storage", "sts-endpoint"),
+    ("storage", "identity-role"),
     ("storage", "endpoint"),
     ("storage", "bucket"),
 ]

@@ -38,3 +38,5 @@ insecure endpoints be default. We can overload that behaviour like so:
 ```
 OAUTHLIB_INSECURE_TRANSPORT=1 REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt poetry run insight file list
 ```
+
+### Releasing

@@ -2,6 +2,9 @@ import click
 import requests
 import logging
 import os
+import urllib
+import base64
+import json
 from minio import Minio
 from xml.etree import ElementTree
 from tqdm import tqdm
@@ -10,6 +13,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 from .config import get_option
 from .oauth import get_client, get_token
+
+
+def parse_token(token):
+    payload = token.split(".")[1].replace("-", "+").replace("_", "/")
+    return json.loads(base64.b64decode(payload).decode("utf-8"))
 
 
 @click.group()
@@ -56,8 +64,29 @@ def upload_file(path, parent_id=None):
     )
 
     if res.status_code != 201:
-        logging.error(res.text)
-        exit(1)
+        data = res.json()
+        # Duplicate key value on unique constraint
+        if data["code"] == "23505":
+            logging.warning(f"{path} already exists!")
+
+            url = os.path.join(get_option("api", "endpoint"), "inodes")
+            params = {"name": f"eq.{path.name}"}
+            if parent_id:
+                params["parent_id"] = f"eq.{parent_id}"
+
+            res = client.get(url + "?" + urllib.parse.urlencode(params))
+            inode = res.json()[0]
+
+            if is_folder:
+                # Recursively upload files
+                for child_path in os.listdir(path):
+                    upload_file(path / child_path, inode["id"])
+            else:
+                return
+
+            # TODO - continue for folders, skip for files
+        else:
+            exit(1)
 
     inode = res.json()[0]
 
@@ -67,7 +96,6 @@ def upload_file(path, parent_id=None):
             upload_file(path / child_path, inode["id"])
     else:
         # TODO - Only upload PDF
-
         size = path.stat().st_size
 
         # Start upload of file
@@ -81,16 +109,24 @@ def upload_file(path, parent_id=None):
             ) as t:
                 reader_wrapper = CallbackIOWrapper(t.update, f, "read")
                 access_token = get_token()["access_token"]
+                token_data = parse_token(access_token)
+
+                data = {
+                    "Action": "AssumeRoleWithWebIdentity",
+                    "Version": "2011-06-15",
+                    "DurationSeconds": "3600",
+                    "RoleSessionName": token_data["sub"],
+                    "WebIdentityToken": access_token,
+                }
+
+                identity_role = get_option("storage", "identity-role")
+                if identity_role:
+                    data["RoleArn"] = identity_role
 
                 # Get storage keys in exchange for JWT
                 res = requests.post(
                     get_option("storage", "sts-endpoint"),
-                    data={
-                        "Action": "AssumeRoleWithWebIdentity",
-                        "Version": "2011-06-15",
-                        "DurationSeconds": "3600",
-                        "WebIdentityToken": access_token,
-                    },
+                    data=data,
                 )
 
                 tree = ElementTree.fromstring(res.content)
@@ -107,12 +143,12 @@ def upload_file(path, parent_id=None):
                     access_key=credentials.find("s3:AccessKeyId", ns).text,
                     secret_key=credentials.find("s3:SecretAccessKey", ns).text,
                     session_token=credentials.find("s3:SessionToken", ns).text,
-                    region="insight",
+                    # region="insight",
                 )
 
                 minio.put_object(
                     get_option("storage", "bucket"),
-                    f"/users/{inode['owner_id']}{inode['path']}/original",
+                    f"users/{inode['owner_id']}{inode['path']}/original",
                     reader_wrapper,
                     size,
                     content_type="application/pdf",

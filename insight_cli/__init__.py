@@ -24,6 +24,11 @@ cli.add_command(file)
     help="S3 Object storage STS endpoint",
 )
 @click.option(
+    "--storage-identity-role",
+    prompt="storage.identity-role",
+    help="S3 Object storage RoleArn",
+)
+@click.option(
     "--storage-endpoint", prompt="storage.endpoint", help="S3 Object storage endpoint"
 )
 @click.option(
@@ -34,6 +39,7 @@ def configure(
     oidc_endpoint,
     oidc_client_id,
     storage_sts_endpoint,
+    storage_identity_role,
     storage_endpoint,
     storage_bucket,
 ):
@@ -45,6 +51,7 @@ def configure(
     config.set("oidc", "endpoint", oidc_endpoint)
     config.set("oidc", "client-id", oidc_client_id)
     config.set("storage", "sts-endpoint", storage_sts_endpoint)
+    config.set("storage", "identity-role", storage_identity_role)
     config.set("storage", "endpoint", storage_endpoint)
     config.set("storage", "bucket", storage_bucket)
     config.write(open(config_file, "w"))
