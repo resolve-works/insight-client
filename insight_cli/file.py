@@ -15,6 +15,9 @@ from .config import get_option
 from .oauth import get_client, get_token
 
 
+logging.basicConfig(level=logging.INFO)
+
+
 def parse_token(token):
     payload = token.split(".")[1].replace("-", "+").replace("_", "/")
     return json.loads(base64.b64decode(payload).decode("utf-8"))
@@ -82,12 +85,16 @@ def upload_file(path, parent_id=None):
                 for child_path in os.listdir(path):
                     upload_file(path / child_path, inode["id"])
             else:
-                return
+                print(f"Skipping upload of {path}")
+
+            return
 
             # TODO - continue for folders, skip for files
         else:
+            logging.error(res.json())
             exit(1)
 
+    print(f"Uploading {path}")
     inode = res.json()[0]
 
     if is_folder:
@@ -161,14 +168,9 @@ def upload_file(path, parent_id=None):
                     data={"is_uploaded": True},
                 )
                 if res.status_code != 204:
+                    print("derp")
                     logging.error(res.text)
                     exit(1)
-
-
-def upload_directory(path, parent_id=None):
-    for child_path in os.listdir(path):
-        print(child_path)
-        pass
 
 
 @file.command()
