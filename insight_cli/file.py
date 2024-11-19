@@ -40,26 +40,37 @@ def load_file(path):
         yield chunk
 
 
-@file.command()
-@click.argument("files", nargs=-1, type=click.Path(path_type=Path))
-def upload(files):
-    """Ingest PDF files"""
+def upload_file(path, parent_id=None):
     client = get_client()
+    is_folder = os.path.isdir(path)
 
-    for path in files:
-        res = client.post(
-            os.path.join(get_option("api", "endpoint"), "inodes"),
-            data={"name": path.name, "type": "file"},
-            headers={"Prefer": "return=representation"},
-        )
+    # Create inode model
+    res = client.post(
+        os.path.join(get_option("api", "endpoint"), "inodes"),
+        data={
+            "name": path.name,
+            "type": "folder" if is_folder else "file",
+            "parent_id": parent_id,
+        },
+        headers={"Prefer": "return=representation"},
+    )
 
-        if res.status_code != 201:
-            logging.error(res.text)
-            exit(1)
+    if res.status_code != 201:
+        logging.error(res.text)
+        exit(1)
 
-        inode = res.json()[0]
+    inode = res.json()[0]
+
+    if is_folder:
+        # Recursively upload files
+        for child_path in os.listdir(path):
+            upload_file(path / child_path, inode["id"])
+    else:
+        # TODO - Only upload PDF
+
         size = path.stat().st_size
 
+        # Start upload of file
         with open(path, "rb") as f:
             with tqdm(
                 desc=path.name,
@@ -107,6 +118,7 @@ def upload(files):
                     content_type="application/pdf",
                 )
 
+                # Mark file as uploaded in backend
                 res = client.patch(
                     os.path.join(get_option("api", "endpoint"), "inodes")
                     + f"?id=eq.{inode['id']}",
@@ -115,3 +127,17 @@ def upload(files):
                 if res.status_code != 204:
                     logging.error(res.text)
                     exit(1)
+
+
+def upload_directory(path, parent_id=None):
+    for child_path in os.listdir(path):
+        print(child_path)
+        pass
+
+
+@file.command()
+@click.argument("files", nargs=-1, type=click.Path(path_type=Path))
+def upload(files):
+    """Ingest PDF files"""
+    for path in files:
+        upload_file(path)
