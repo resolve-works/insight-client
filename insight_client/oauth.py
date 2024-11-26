@@ -5,6 +5,8 @@ import webbrowser
 import requests
 import logging
 import os
+import base64
+import json
 from pathlib import Path
 from oauthlib.oauth2 import DeviceClient
 from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
@@ -12,6 +14,11 @@ from requests_oauthlib import OAuth2Session
 from .config import get_option
 
 logging.basicConfig(level=logging.ERROR)
+
+
+def parse_token(token):
+    payload = token.split(".")[1].replace("-", "+").replace("_", "/")
+    return json.loads(base64.b64decode(payload).decode("utf-8"))
 
 
 def set_token(token):
