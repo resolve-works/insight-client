@@ -11,7 +11,7 @@ from tqdm import tqdm
 from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
 from urllib.parse import urlparse
-from .config import get_option
+from .config import get_option, config
 from .oauth import get_client, get_token
 
 
@@ -126,9 +126,12 @@ def upload_file(path, parent_id=None):
                     "WebIdentityToken": access_token,
                 }
 
-                identity_role = get_option("storage", "identity-role")
-                if identity_role:
-                    data["RoleArn"] = identity_role
+                try:
+                    identity_role = config.get("storage", "identity-role")
+                    if identity_role:
+                        data["RoleArn"] = identity_role
+                except:
+                    pass
 
                 # Get storage keys in exchange for JWT
                 res = requests.post(
@@ -150,7 +153,7 @@ def upload_file(path, parent_id=None):
                     access_key=credentials.find("s3:AccessKeyId", ns).text,
                     secret_key=credentials.find("s3:SecretAccessKey", ns).text,
                     session_token=credentials.find("s3:SessionToken", ns).text,
-                    # region="insight",
+                    region=config.get("storage", "region", fallback=None),
                 )
 
                 minio.put_object(

@@ -23,6 +23,7 @@ keys = [
     ("storage", "identity-role"),
     ("storage", "endpoint"),
     ("storage", "bucket"),
+    ("storage", "region"),
 ]
 
 
@@ -37,6 +38,7 @@ for section, option in keys:
         config.set(section, option, env.get(key))
 
 
+# Let user know config is missing when CLI is used without config present
 def get_option(section, option):
     try:
         return config.get(section, option)
