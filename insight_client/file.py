@@ -49,7 +49,18 @@ def create_inode(name: str, inode_type: InodeType, parent_id: str | None = None)
     return response.json()[0]
 
 
-def upload(path: str, size: int, reader: BinaryIO):
+def get_inode(name: str, parent_id: str | None = None):
+    client = get_client()
+    url = os.path.join(get_option("api", "endpoint"), "inodes")
+    params = {"name": f"eq.{name}"}
+    if parent_id:
+        params["parent_id"] = f"eq.{parent_id}"
+
+    res = client.get(url + "?" + urllib.parse.urlencode(params))
+    return res.json()[0]
+
+
+def upload_object(path: str, size: int, reader: BinaryIO):
     access_token = get_token()["access_token"]
     token_data = parse_token(access_token)
 
@@ -75,8 +86,19 @@ def upload(path: str, size: int, reader: BinaryIO):
     )
 
 
-def process_path(path, parent_id=None):
+def mark_file_uploaded(id: str):
     client = get_client()
+    # Mark file as uploaded in backend
+    res = client.patch(
+        os.path.join(get_option("api", "endpoint"), "inodes") + f"?id=eq.{id}",
+        data={"is_uploaded": True},
+    )
+    if res.status_code != 204:
+        data = res.json()
+        raise Exception(data["message"])
+
+
+def process_path(path, parent_id=None):
     inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
 
     try:
@@ -93,36 +115,18 @@ def process_path(path, parent_id=None):
             # Start upload of file
             with open(path, "rb") as f:
                 with tqdm(
-                    desc=path.name,
-                    total=size,
-                    unit="iB",
-                    unit_scale=True,
-                    unit_divisor=1024,
+                    total=size, unit="iB", unit_scale=True, unit_divisor=1024
                 ) as t:
                     reader_wrapper = CallbackIOWrapper(t.update, f, "read")
 
-                    upload(inode["path"], size, reader_wrapper)
+                    upload_object(inode["path"], size, reader_wrapper)
 
                     # Mark file as uploaded in backend
-                    res = client.patch(
-                        os.path.join(get_option("api", "endpoint"), "inodes")
-                        + f"?id=eq.{inode['id']}",
-                        data={"is_uploaded": True},
-                    )
-                    if res.status_code != 204:
-                        print("derp")
-                        logging.error(res.text)
-                        exit(1)
+                    mark_file_uploaded(inode["id"])
     except InodeExistsException:
         logging.warning(f"{path} already exists!")
 
-        url = os.path.join(get_option("api", "endpoint"), "inodes")
-        params = {"name": f"eq.{path.name}"}
-        if parent_id:
-            params["parent_id"] = f"eq.{parent_id}"
-
-        res = client.get(url + "?" + urllib.parse.urlencode(params))
-        inode = res.json()[0]
+        inode = get_inode(path.name, parent_id)
 
         if inode_type == InodeType.FOLDER:
             # Recursively upload files
