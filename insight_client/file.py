@@ -1,17 +1,16 @@
 import click
-import requests
 import logging
 import os
 import urllib
+from typing import BinaryIO
 from enum import Enum
 from minio import Minio
-from xml.etree import ElementTree
 from tqdm import tqdm
 from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
 from urllib.parse import urlparse
 from .config import get_option, config
-from .oauth import get_client, get_token, parse_token
+from .oauth import get_client, get_token, parse_token, get_storage_credentials
 
 
 logging.basicConfig(level=logging.INFO)
@@ -50,20 +49,35 @@ def create_inode(name: str, inode_type: InodeType, parent_id: str | None = None)
     return response.json()[0]
 
 
-def upload_file(path, parent_id=None):
+def upload(path: str, size: int, reader: BinaryIO):
+    access_token = get_token()["access_token"]
+    token_data = parse_token(access_token)
+
+    access_key, secret_key, session_token = get_storage_credentials()
+
+    # Upload file to storage backend
+    url = urlparse(get_option("storage", "endpoint"))
+    minio = Minio(
+        url.netloc,
+        secure=url.scheme == "https",
+        access_key=access_key,
+        secret_key=secret_key,
+        session_token=session_token,
+        region=config.get("storage", "region", fallback=None),
+    )
+
+    minio.put_object(
+        get_option("storage", "bucket"),
+        f"users/{token_data['sub']}{path}/original",
+        reader,
+        size,
+        content_type="application/pdf",
+    )
+
+
+def process_path(path, parent_id=None):
     client = get_client()
     inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
-
-    # Create inode model
-    res = client.post(
-        os.path.join(get_option("api", "endpoint"), "inodes"),
-        data={
-            "name": path.name,
-            "type": inode_type,
-            "parent_id": parent_id,
-        },
-        headers={"Prefer": "return=representation"},
-    )
 
     try:
         inode = create_inode(path.name, inode_type, parent_id)
@@ -71,10 +85,9 @@ def upload_file(path, parent_id=None):
         if inode_type == InodeType.FOLDER:
             # Recursively upload files
             for child_path in os.listdir(path):
-                upload_file(path / child_path, inode["id"])
+                process_path(path / child_path, inode["id"])
         else:
             print(f"Uploading {path}")
-            # TODO - Only upload PDF
             size = path.stat().st_size
 
             # Start upload of file
@@ -87,54 +100,8 @@ def upload_file(path, parent_id=None):
                     unit_divisor=1024,
                 ) as t:
                     reader_wrapper = CallbackIOWrapper(t.update, f, "read")
-                    access_token = get_token()["access_token"]
-                    token_data = parse_token(access_token)
 
-                    data = {
-                        "Action": "AssumeRoleWithWebIdentity",
-                        "Version": "2011-06-15",
-                        "DurationSeconds": "3600",
-                        "RoleSessionName": token_data["sub"],
-                        "WebIdentityToken": access_token,
-                    }
-
-                    try:
-                        identity_role = config.get("storage", "identity-role")
-                        if identity_role:
-                            data["RoleArn"] = identity_role
-                    except:
-                        pass
-
-                    # Get storage keys in exchange for JWT
-                    res = requests.post(
-                        get_option("storage", "sts-endpoint"),
-                        data=data,
-                    )
-
-                    tree = ElementTree.fromstring(res.content)
-                    ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
-                    credentials = tree.find(
-                        "./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns
-                    )
-
-                    # Upload file to storage backend
-                    url = urlparse(get_option("storage", "endpoint"))
-                    minio = Minio(
-                        url.netloc,
-                        secure=url.scheme == "https",
-                        access_key=credentials.find("s3:AccessKeyId", ns).text,
-                        secret_key=credentials.find("s3:SecretAccessKey", ns).text,
-                        session_token=credentials.find("s3:SessionToken", ns).text,
-                        region=config.get("storage", "region", fallback=None),
-                    )
-
-                    minio.put_object(
-                        get_option("storage", "bucket"),
-                        f"users/{inode['owner_id']}{inode['path']}/original",
-                        reader_wrapper,
-                        size,
-                        content_type="application/pdf",
-                    )
+                    upload(inode["path"], size, reader_wrapper)
 
                     # Mark file as uploaded in backend
                     res = client.patch(
@@ -160,12 +127,9 @@ def upload_file(path, parent_id=None):
         if inode_type == InodeType.FOLDER:
             # Recursively upload files
             for child_path in os.listdir(path):
-                upload_file(path / child_path, inode["id"])
+                process_path(path / child_path, inode["id"])
         else:
             print(f"Skipping upload of {path}")
-    except Exception as e:
-        logging.error(e)
-        exit(1)
 
 
 @click.group()
@@ -187,4 +151,4 @@ def list():
 def upload(files):
     """Ingest PDF files"""
     for path in files:
-        upload_file(path)
+        process_path(path)

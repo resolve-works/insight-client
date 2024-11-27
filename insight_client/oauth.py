@@ -1,17 +1,17 @@
 import json
 import time
-import keyring
 import webbrowser
 import requests
 import logging
 import os
 import base64
 import json
+from xml.etree import ElementTree
 from pathlib import Path
 from oauthlib.oauth2 import DeviceClient
 from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
 from requests_oauthlib import OAuth2Session
-from .config import get_option
+from .config import get_option, config
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -22,36 +22,17 @@ def parse_token(token):
 
 
 def set_token(token):
-    try:
-        keyring.set_password("insight", "token", json.dumps(token))
-    except:
-        logging.warning("No suitable keyring backend, storing token as plaintext!")
-        with open("token.json", "w") as fh:
-            fh.write(json.dumps(token))
+    with open("token.json", "w") as fh:
+        fh.write(json.dumps(token))
 
 
 def get_token():
-    try:
-        token = keyring.get_password("insight", "token")
-        return json.loads(token) if token is not None else None
-    except:
-        try:
-            with open("token.json", "r") as fh:
-                logging.warning(
-                    "No suitable keyring backend, reading token from plaintext!"
-                )
-                return json.load(fh)
-        except FileNotFoundError:
-            return None
+    with open("token.json", "r") as fh:
+        return json.load(fh)
 
 
 def delete_token():
-    try:
-        keyring.delete_password("insight", "token")
-    except:
-        logging.warning("No suitable keyring backend, removing plaintext token file")
-        Path.unlink("token.json")
-        return None
+    Path.unlink("token.json")
 
 
 def get_client():
@@ -92,3 +73,39 @@ def authorize_device():
             break
         except CustomOAuth2Error:
             time.sleep(body["interval"])
+
+
+def get_storage_credentials():
+    access_token = get_token()["access_token"]
+    token_data = parse_token(access_token)
+
+    data = {
+        "Action": "AssumeRoleWithWebIdentity",
+        "Version": "2011-06-15",
+        "DurationSeconds": "3600",
+        "RoleSessionName": token_data["sub"],
+        "WebIdentityToken": access_token,
+    }
+
+    try:
+        identity_role = config.get("storage", "identity-role")
+        if identity_role:
+            data["RoleArn"] = identity_role
+    except:
+        pass
+
+    # Get storage keys in exchange for JWT
+    res = requests.post(
+        get_option("storage", "sts-endpoint"),
+        data=data,
+    )
+
+    tree = ElementTree.fromstring(res.content)
+    ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
+    credentials = tree.find("./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns)
+
+    return (
+        credentials.find("s3:AccessKeyId", ns).text,
+        credentials.find("s3:SecretAccessKey", ns).text,
+        credentials.find("s3:SessionToken", ns).text,
+    )

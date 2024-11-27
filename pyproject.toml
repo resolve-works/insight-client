@@ -2,13 +2,12 @@
 name = "insight-client"
 version = "v0.3.2"
 description = "Python client and CLI for the insight system"
-authors = ["Johan <johan@ftm.nl>"]
+authors = ["Johan <johan@resolve.works>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
 click = "^8.1.7"
-keyring = "^24.2.0"
 tqdm = "^4.66.1"
 requests-oauthlib = "^1.3.1"
 minio = "^7.2.0"
