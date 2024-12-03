@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "insight-client"
-version = "v0.3.5"
+version = "v0.3.6"
 description = "Python client and CLI for the insight system"
 authors = ["Johan <johan@resolve.works>"]
 readme = "README.md"

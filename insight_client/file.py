@@ -17,7 +17,7 @@ def file():
 
 @file.command()
 def list():
-    """List uploaded PDF files."""
+    """List uploaded files and folders."""
     client = InsightClient()
     res = client.get(os.path.join(config.get("api", "endpoint"), "inodes"))
     print(res.text)
@@ -25,8 +25,17 @@ def list():
 
 @file.command()
 @click.argument("files", nargs=-1, type=click.Path(path_type=Path))
-def upload(files):
+@click.option("--is-public", is_flag=True)
+def upload(files, is_public):
     client = InsightClient()
     """Ingest PDF files"""
     for path in files:
-        client.process_path(path)
+        client.process_path(path, is_public=is_public)
+
+
+@file.command()
+@click.argument("id")
+def delete(id):
+    """Delete file or folder."""
+    client = InsightClient()
+    client.delete_inode(id)

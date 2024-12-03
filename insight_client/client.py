@@ -17,6 +17,7 @@ from enum import Enum
 from urllib.parse import urlparse, urlencode
 from typing import BinaryIO
 from minio import Minio
+from minio.commonconfig import Tags
 from .config import config
 
 
@@ -49,7 +50,11 @@ class InsightClient(OAuth2Session):
         )
 
     def create_inode(
-        self, name: str, inode_type: InodeType, parent_id: str | None = None
+        self,
+        name: str,
+        inode_type: InodeType,
+        parent_id: str | None = None,
+        is_public=False,
     ):
         # Create inode model
         response = self.post(
@@ -58,6 +63,7 @@ class InsightClient(OAuth2Session):
                 "name": name,
                 "type": inode_type.value,
                 "parent_id": parent_id,
+                "is_public": is_public,
             },
             headers={"Prefer": "return=representation"},
         )
@@ -78,29 +84,36 @@ class InsightClient(OAuth2Session):
         if parent_id:
             params["parent_id"] = f"eq.{parent_id}"
 
-        res = self.get(url + "?" + urlencode(params))
-        return res.json()[0]
+        response = self.get(url + "?" + urlencode(params))
+        return response.json()[0]
+
+    def delete_inode(self, id: str):
+        url = os.path.join(config.get("api", "endpoint"), "inodes")
+        params = {"id": f"eq.{id}"}
+        response = self.delete(url + "?" + urlencode(params))
+        if response.status_code != 204:
+            raise Exception(response.json()["message"])
 
     def mark_file_uploaded(self, id: str):
         # Mark file as uploaded in backend
-        res = self.patch(
+        response = self.patch(
             os.path.join(config.get("api", "endpoint"), "inodes") + f"?id=eq.{id}",
             data={"is_uploaded": True},
         )
-        if res.status_code != 204:
-            data = res.json()
+        if response.status_code != 204:
+            data = response.json()
             raise Exception(data["message"])
 
-    def process_path(self, path: Path, parent_id=None):
+    def process_path(self, path: Path, parent_id: str | None = None, is_public=False):
         inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
 
         try:
-            inode = self.create_inode(path.name, inode_type, parent_id)
+            inode = self.create_inode(path.name, inode_type, parent_id, is_public)
 
             if inode_type == InodeType.FOLDER:
                 # Recursively upload files
                 for child_path in os.listdir(path):
-                    self.process_path(path / child_path, inode["id"])
+                    self.process_path(path / child_path, inode["id"], is_public)
             else:
                 print(f"Uploading {path}")
                 size = path.stat().st_size
@@ -112,7 +125,9 @@ class InsightClient(OAuth2Session):
                     ) as t:
                         reader_wrapper = CallbackIOWrapper(t.update, f, "read")
 
-                        self.upload_object(inode["path"], size, reader_wrapper)
+                        self.upload_object(
+                            inode["path"], size, reader_wrapper, is_public
+                        )
 
                         # Mark file as uploaded in backend
                         self.mark_file_uploaded(inode["id"])
@@ -124,16 +139,18 @@ class InsightClient(OAuth2Session):
             if inode_type == InodeType.FOLDER:
                 # Recursively upload files
                 for child_path in os.listdir(path):
-                    self.process_path(path / child_path, inode["id"])
+                    self.process_path(path / child_path, inode["id"], is_public)
             else:
                 print(f"Skipping upload of {path}")
 
     def get_user_id(self):
-        access_token = self.token["access_token"]
-        token_data = parse_token(access_token)
+        payload = (
+            self.token["access_token"].split(".")[1].replace("-", "+").replace("_", "/")
+        )
+        token_data = json.loads(base64.b64decode(payload + "==").decode("utf-8"))
         return token_data["sub"]
 
-    def upload_object(self, path: str, size: int, reader: BinaryIO):
+    def upload_object(self, path: str, size: int, reader: BinaryIO, is_public=False):
         access_key, secret_key, session_token = self.get_storage_credentials()
 
         # Upload file to storage backend
@@ -147,13 +164,20 @@ class InsightClient(OAuth2Session):
             region=config.get("storage", "region", fallback=None),
         )
 
+        object_path = f"users/{self.get_user_id()}{path}/original"
+
         minio.put_object(
             config.get("storage", "bucket"),
-            f"users/{self.get_user_id()}{path}/original",
+            object_path,
             reader,
             size,
             content_type="application/pdf",
         )
+
+        if is_public:
+            tags = Tags.new_object_tags()
+            tags["is_public"] = str(is_public)
+            minio.set_object_tags(config.get("storage", "bucket"), object_path, tags)
 
     def get_storage_credentials(self):
         data = {
@@ -170,8 +194,8 @@ class InsightClient(OAuth2Session):
             data["RoleArn"] = identity_role
 
         # Get storage keys in exchange for JWT
-        res = requests.post(config.get("storage", "sts-endpoint"), data=data)
-        tree = ElementTree.fromstring(res.content)
+        response = requests.post(config.get("storage", "sts-endpoint"), data=data)
+        tree = ElementTree.fromstring(response.content)
         ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
         credentials = tree.find(
             "./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns
@@ -184,27 +208,17 @@ class InsightClient(OAuth2Session):
         )
 
 
-def parse_token(token):
-    payload = token.split(".")[1].replace("-", "+").replace("_", "/")
-    return json.loads(base64.b64decode(payload).decode("utf-8"))
-
-
-def set_token(token):
-    try:
-        keyring.set_password("insight", "token", json.dumps(token))
-    except:
-        logging.warning("No suitable keyring backend, storing token as plaintext!")
-        with open("token.json", "w") as fh:
-            fh.write(json.dumps(token))
-
-
 def get_initial_token():
+    token_url = os.path.join(config.get("oidc", "endpoint"), "token")
+
     try:
-        return get_token()
+        token = get_token()
+        session = OAuth2Session(client_id=config.get("oidc", "client-id"), token=token)
+
+        return session.refresh_token()
     except:
         client_secret = config.get("oidc", "client-secret", fallback=None)
         client_id = config.get("oidc", "client-id")
-        token_url = os.path.join(config.get("oidc", "endpoint"), "token")
 
         if client_secret:
             session = OAuth2Session(
@@ -215,11 +229,11 @@ def get_initial_token():
                 token_url=token_url, client_id=client_id, client_secret=client_secret
             )
         else:
-            res = requests.post(
+            response = requests.post(
                 os.path.join(config.get("oidc", "endpoint"), "auth", "device"),
                 data={"client_id": client_id},
             )
-            body = res.json()
+            body = response.json()
 
             try:
                 webbrowser.get()
@@ -240,6 +254,15 @@ def get_initial_token():
                     )
                 except CustomOAuth2Error:
                     time.sleep(body["interval"])
+
+
+def set_token(token):
+    try:
+        keyring.set_password("insight", "token", json.dumps(token))
+    except:
+        logging.warning("No suitable keyring backend, storing token as plaintext!")
+        with open("token.json", "w") as fh:
+            fh.write(json.dumps(token))
 
 
 def get_token():
