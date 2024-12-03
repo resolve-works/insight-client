@@ -10,14 +10,14 @@ from tqdm import tqdm
 from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
 from xml.etree import ElementTree
-from oauthlib.oauth2 import DeviceClient
+from oauthlib.oauth2 import DeviceClient, BackendApplicationClient
 from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
 from requests_oauthlib import OAuth2Session
 from enum import Enum
 from urllib.parse import urlparse, urlencode
 from typing import BinaryIO
 from minio import Minio
-from .config import get_option, config
+from .config import config
 
 
 logging.basicConfig(level=logging.INFO)
@@ -33,12 +33,27 @@ class InodeExistsException(Exception):
 
 
 class InsightClient(OAuth2Session):
+    def __init__(self):
+        token_url = os.path.join(config.get("oidc", "endpoint"), "token")
+        token = get_initial_token()
+        set_token(token)
+
+        super().__init__(
+            client_id=config.get("oidc", "client-id"),
+            token=token,
+            auto_refresh_url=token_url,
+            auto_refresh_kwargs={
+                "client_id": config.get("oidc", "client-id"),
+            },
+            token_updater=set_token,
+        )
+
     def create_inode(
         self, name: str, inode_type: InodeType, parent_id: str | None = None
     ):
         # Create inode model
         response = self.post(
-            os.path.join(get_option("api", "endpoint"), "inodes"),
+            os.path.join(config.get("api", "endpoint"), "inodes"),
             data={
                 "name": name,
                 "type": inode_type.value,
@@ -58,7 +73,7 @@ class InsightClient(OAuth2Session):
         return response.json()[0]
 
     def get_inode(self, name: str, parent_id: str | None = None):
-        url = os.path.join(get_option("api", "endpoint"), "inodes")
+        url = os.path.join(config.get("api", "endpoint"), "inodes")
         params = {"name": f"eq.{name}"}
         if parent_id:
             params["parent_id"] = f"eq.{parent_id}"
@@ -69,7 +84,7 @@ class InsightClient(OAuth2Session):
     def mark_file_uploaded(self, id: str):
         # Mark file as uploaded in backend
         res = self.patch(
-            os.path.join(get_option("api", "endpoint"), "inodes") + f"?id=eq.{id}",
+            os.path.join(config.get("api", "endpoint"), "inodes") + f"?id=eq.{id}",
             data={"is_uploaded": True},
         )
         if res.status_code != 204:
@@ -122,7 +137,7 @@ class InsightClient(OAuth2Session):
         access_key, secret_key, session_token = self.get_storage_credentials()
 
         # Upload file to storage backend
-        url = urlparse(get_option("storage", "endpoint"))
+        url = urlparse(config.get("storage", "endpoint"))
         minio = Minio(
             url.netloc,
             secure=url.scheme == "https",
@@ -133,7 +148,7 @@ class InsightClient(OAuth2Session):
         )
 
         minio.put_object(
-            get_option("storage", "bucket"),
+            config.get("storage", "bucket"),
             f"users/{self.get_user_id()}{path}/original",
             reader,
             size,
@@ -150,15 +165,12 @@ class InsightClient(OAuth2Session):
         }
 
         # AWS requires RoleArn to be set, minio doesn't.
-        try:
-            identity_role = config.get("storage", "identity-role")
-            if identity_role:
-                data["RoleArn"] = identity_role
-        except:
-            pass
+        identity_role = config.get("storage", "identity-role", fallback=None)
+        if identity_role:
+            data["RoleArn"] = identity_role
 
         # Get storage keys in exchange for JWT
-        res = requests.post(get_option("storage", "sts-endpoint"), data=data)
+        res = requests.post(config.get("storage", "sts-endpoint"), data=data)
         tree = ElementTree.fromstring(res.content)
         ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
         credentials = tree.find(
@@ -186,6 +198,50 @@ def set_token(token):
             fh.write(json.dumps(token))
 
 
+def get_initial_token():
+    try:
+        return get_token()
+    except:
+        client_secret = config.get("oidc", "client-secret", fallback=None)
+        client_id = config.get("oidc", "client-id")
+        token_url = os.path.join(config.get("oidc", "endpoint"), "token")
+
+        if client_secret:
+            session = OAuth2Session(
+                client=BackendApplicationClient(client_id=client_id)
+            )
+
+            return session.fetch_token(
+                token_url=token_url, client_id=client_id, client_secret=client_secret
+            )
+        else:
+            res = requests.post(
+                os.path.join(config.get("oidc", "endpoint"), "auth", "device"),
+                data={"client_id": client_id},
+            )
+            body = res.json()
+
+            try:
+                webbrowser.get()
+                webbrowser.open(body["verification_uri_complete"])
+            except webbrowser.Error:
+                print(
+                    f"Open {body['verification_uri_complete']} to authorize this device."
+                )
+
+            until_time = time.time() + body["expires_in"]
+            while until_time > time.time():
+                try:
+                    session = OAuth2Session(client=DeviceClient(client_id))
+                    return session.fetch_token(
+                        client_id=client_id,
+                        token_url=token_url,
+                        device_code=body["device_code"],
+                    )
+                except CustomOAuth2Error:
+                    time.sleep(body["interval"])
+
+
 def get_token():
     try:
         token = keyring.get_password("insight", "token")
@@ -204,44 +260,3 @@ def delete_token():
     except:
         logging.warning("No suitable keyring backend, removing plaintext token file")
         Path.unlink("token.json")
-
-
-def get_client():
-    return InsightClient(
-        client_id=get_option("oidc", "client-id"),
-        token=get_token(),
-        auto_refresh_url=os.path.join(get_option("oidc", "endpoint"), "token"),
-        auto_refresh_kwargs={
-            "client_id": get_option("oidc", "client-id"),
-        },
-        token_updater=set_token,
-    )
-
-
-def authorize_device():
-    res = requests.post(
-        os.path.join(get_option("oidc", "endpoint"), "auth", "device"),
-        data={"client_id": get_option("oidc", "client-id")},
-    )
-    body = res.json()
-
-    try:
-        webbrowser.get()
-        webbrowser.open(body["verification_uri_complete"])
-    except webbrowser.Error:
-        print(f"Open {body['verification_uri_complete']} to authorize this device.")
-
-    until_time = time.time() + body["expires_in"]
-    while until_time > time.time():
-        client = DeviceClient(get_option("oidc", "client-id"))
-        try:
-            session = OAuth2Session(client=client)
-            token = session.fetch_token(
-                client_id=get_option("oidc", "client-id"),
-                token_url=os.path.join(get_option("oidc", "endpoint"), "token"),
-                device_code=body["device_code"],
-            )
-            set_token(token)
-            break
-        except CustomOAuth2Error:
-            time.sleep(body["interval"])

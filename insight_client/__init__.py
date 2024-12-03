@@ -1,6 +1,6 @@
 import click
 from .file import file
-from .client import authorize_device, delete_token, get_client
+from .client import delete_token, InsightClient
 from configparser import ConfigParser
 from .config import config_file, keys
 
@@ -44,20 +44,14 @@ def configure(**kwargs):
 
 
 @cli.command()
-def login():
-    """Get access token from authentication provider."""
-    authorize_device()
-
-
-@cli.command()
-def logout():
+def reset():
     """Remove authentication access token."""
     delete_token()
 
 
 @cli.command()
 def user_info():
-    client = get_client()
+    client = InsightClient()
     res = client.get(
         "https://secure.ftm.nl/realms/insight/account",
         headers={"Accept": "application/json"},
@@ -67,7 +61,7 @@ def user_info():
 
 @cli.command()
 def user_groups():
-    client = get_client()
+    client = InsightClient()
     res = client.get(
         "https://secure.ftm.nl/realms/insight/account/groups",
         headers={"Accept": "application/json"},

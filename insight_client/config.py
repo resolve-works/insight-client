@@ -36,16 +36,3 @@ for section, option in keys:
     key = environment_variable(section, option)
     if env.get(key) is not None:
         config.set(section, option, env.get(key))
-
-
-# Let user know config is missing when CLI is used without config present
-def get_option(section, option):
-    try:
-        return config.get(section, option)
-    except Exception:
-        key = environment_variable(section, option)
-        logging.error(
-            f"Config option {section}.{option} not found and {key} not set in environment."
-        )
-        logging.error(f"Configure with `insight configure` or set {key}")
-        exit(1)
