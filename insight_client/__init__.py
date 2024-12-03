@@ -1,6 +1,6 @@
 import click
 from .file import file
-from .oauth import authorize_device, delete_token, get_client
+from .client import authorize_device, delete_token, get_client
 from configparser import ConfigParser
 from .config import config_file, keys
 
