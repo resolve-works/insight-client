@@ -254,9 +254,14 @@ def get_token():
             return json.load(fh)
 
 
+# Make sure to delete it all
 def delete_token():
     try:
         keyring.delete_password("insight", "token")
     except:
-        logging.warning("No suitable keyring backend, removing plaintext token file")
+        pass
+
+    try:
         Path.unlink("token.json")
+    except:
+        pass
