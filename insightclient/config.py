@@ -35,4 +35,6 @@ def environment_variable(section, option: str):
 for section, option in keys:
     key = environment_variable(section, option)
     if env.get(key) is not None:
+        if not config.has_section(section):
+            config.add_section(section)
         config.set(section, option, env.get(key))
