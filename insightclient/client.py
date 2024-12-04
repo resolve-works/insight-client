@@ -44,6 +44,7 @@ class InsightClient(OAuth2Session):
             auto_refresh_url=token_url,
             auto_refresh_kwargs={
                 "client_id": config.get("oidc", "client-id"),
+                "client_secret": config.get("oidc", "client-secret", fallback=None),
             },
             token_updater=set_token,
         )
