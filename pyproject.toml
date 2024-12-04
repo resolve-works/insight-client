@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "insight-client"
+name = "insightclient"
 version = "v0.3.6"
-description = "Python client and CLI for the insight system"
+description = "Python client and CLI for Insight"
 authors = ["Johan <johan@resolve.works>"]
 readme = "README.md"
 
@@ -14,7 +14,7 @@ requests-oauthlib = "^2.0.0"
 keyring = "^25.5.0"
 
 [tool.poetry.scripts]
-insight = "insight_client:cli"
+insight = "insightclient:cli"
 
 [build-system]
 requires = ["poetry-core"]
