@@ -20,8 +20,7 @@ from minio import Minio
 from minio.commonconfig import Tags
 from .config import config
 
-
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 
 
 class InodeType(Enum):
@@ -94,6 +93,30 @@ class InsightClient(OAuth2Session):
         if response.status_code != 204:
             raise Exception(response.json()["message"])
 
+    def create_folder(self, name: str, parent_id: str | None = None, is_public=False):
+        try:
+            return self.create_inode(name, InodeType.FOLDER, parent_id, is_public)
+        except InodeExistsException:
+            return self.get_inode(name, parent_id)
+
+    def create_file(
+        self,
+        name: str,
+        size: int,
+        reader: BinaryIO,
+        parent_id: str | None = None,
+        is_public=False,
+    ):
+        try:
+            # Only upload when inode didn't exist yet
+            inode = self.create_inode(name, InodeType.FILE, parent_id, is_public)
+            self.upload_object(inode["path"], size, reader, is_public)
+            self.mark_file_uploaded(inode["id"])
+
+            return inode
+        except InodeExistsException:
+            return self.get_inode(name, parent_id)
+
     def mark_file_uploaded(self, id: str):
         # Mark file as uploaded in backend
         response = self.patch(
@@ -107,41 +130,33 @@ class InsightClient(OAuth2Session):
     def process_path(self, path: Path, parent_id: str | None = None, is_public=False):
         inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
 
-        try:
-            inode = self.create_inode(path.name, inode_type, parent_id, is_public)
+        if inode_type == InodeType.FOLDER:
+            inode = self.create_folder(path.name, parent_id, is_public)
 
-            if inode_type == InodeType.FOLDER:
-                # Recursively upload files
-                for child_path in os.listdir(path):
-                    self.process_path(path / child_path, inode["id"], is_public)
-            else:
-                print(f"Uploading {path}")
-                size = path.stat().st_size
+            # Recursively upload files
+            for child_path in os.listdir(path):
+                self.process_path(path / child_path, inode["id"], is_public)
+        else:
+            size = path.stat().st_size
 
-                # Start upload of file
+            try:
+                # Only upload when inode didn't exist yet
+                inode = self.create_inode(
+                    path.name, InodeType.FILE, parent_id, is_public
+                )
+
+                logging.info(f"Uploading {path}")
                 with open(path, "rb") as f:
                     with tqdm(
                         total=size, unit="iB", unit_scale=True, unit_divisor=1024
                     ) as t:
                         reader_wrapper = CallbackIOWrapper(t.update, f, "read")
-
                         self.upload_object(
                             inode["path"], size, reader_wrapper, is_public
                         )
-
-                        # Mark file as uploaded in backend
-                        self.mark_file_uploaded(inode["id"])
-        except InodeExistsException:
-            logging.warning(f"{path} already exists!")
-
-            inode = self.get_inode(path.name, parent_id)
-
-            if inode_type == InodeType.FOLDER:
-                # Recursively upload files
-                for child_path in os.listdir(path):
-                    self.process_path(path / child_path, inode["id"], is_public)
-            else:
-                print(f"Skipping upload of {path}")
+                self.mark_file_uploaded(inode["id"])
+            except InodeExistsException:
+                logging.info(f"File exists: {path}")
 
     def get_user_id(self):
         payload = (
