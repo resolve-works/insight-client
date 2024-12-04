@@ -179,7 +179,7 @@ class InsightClient(OAuth2Session):
             region=config.get("storage", "region", fallback=None),
         )
 
-        object_path = f"users/{self.get_user_id()}{path}/original"
+        object_path = f"users/{self.get_user_id()}{path}"
 
         minio.put_object(
             config.get("storage", "bucket"),
