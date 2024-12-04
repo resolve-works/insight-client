@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/insight-client
+      url: https://pypi.org/p/insightclient
     permissions:
       id-token: write
     steps:
