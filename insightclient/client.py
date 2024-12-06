@@ -37,6 +37,8 @@ class InsightClient(OAuth2Session):
     client_id = config.get("oidc", "client-id")
     client_secret = config.get("oidc", "client-secret", fallback=None)
 
+    storage_token: dict | None = None
+
     def __init__(self):
         token = get_initial_token(self.token_url, self.client_id, self.client_secret)
 
@@ -47,17 +49,53 @@ class InsightClient(OAuth2Session):
         else:
             super().__init__(client=BackendApplicationClient(client_id=self.client_id))
 
+    def fetch_token(self, *args, **kwargs):
+        token = super().fetch_token(*args, **kwargs)
+        self.refresh_storage_credentials()
+        return token
+
     def refresh_token(self):
         if "refresh_token" in self.token:
+            # Refresh token & storage creds
             super().refresh_token(
                 self.token_url,
                 client_id=self.client_id,
                 client_secret=self.client_secret,
             )
+            self.refresh_storage_credentials()
+            # Remember token as we can use it later to refresh
             set_token(self.token)
             return self.token
         else:
-            return super().fetch_token(self.token_url, client_secret=self.client_secret)
+            return self.fetch_token(self.token_url, client_secret=self.client_secret)
+
+    def refresh_storage_credentials(self):
+        data = {
+            "Action": "AssumeRoleWithWebIdentity",
+            "Version": "2011-06-15",
+            "DurationSeconds": "3600",
+            "RoleSessionName": self.get_user_id(),
+            "WebIdentityToken": self.token["access_token"],
+        }
+
+        # AWS requires RoleArn to be set, minio doesn't.
+        identity_role = config.get("storage", "identity-role", fallback=None)
+        if identity_role:
+            data["RoleArn"] = identity_role
+
+        # Get storage keys in exchange for JWT
+        response = requests.post(config.get("storage", "sts-endpoint"), data=data)
+        tree = ElementTree.fromstring(response.content)
+        ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
+        credentials = tree.find(
+            "./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns
+        )
+
+        self.storage_token = {
+            "access_key": credentials.find("s3:AccessKeyId", ns).text,
+            "secret_key": credentials.find("s3:SecretAccessKey", ns).text,
+            "session_token": credentials.find("s3:SessionToken", ns).text,
+        }
 
     def request(self, method: str, url: str, *args, **kwargs):
         try:
@@ -202,16 +240,14 @@ class InsightClient(OAuth2Session):
         return token_data["sub"]
 
     def upload_object(self, path: str, size: int, reader: BinaryIO, is_public=False):
-        access_key, secret_key, session_token = self.get_storage_credentials()
-
         # Upload file to storage backend
         url = urlparse(config.get("storage", "endpoint"))
         minio = Minio(
             url.netloc,
             secure=url.scheme == "https",
-            access_key=access_key,
-            secret_key=secret_key,
-            session_token=session_token,
+            access_key=self.storage_token["access_key"],
+            secret_key=self.storage_token["secret_key"],
+            session_token=self.storage_token["session_token"],
             region=config.get("storage", "region", fallback=None),
         )
 
@@ -229,34 +265,6 @@ class InsightClient(OAuth2Session):
             tags = Tags.new_object_tags()
             tags["is_public"] = str(is_public)
             minio.set_object_tags(config.get("storage", "bucket"), object_path, tags)
-
-    def get_storage_credentials(self):
-        data = {
-            "Action": "AssumeRoleWithWebIdentity",
-            "Version": "2011-06-15",
-            "DurationSeconds": "3600",
-            "RoleSessionName": self.get_user_id(),
-            "WebIdentityToken": self.token["access_token"],
-        }
-
-        # AWS requires RoleArn to be set, minio doesn't.
-        identity_role = config.get("storage", "identity-role", fallback=None)
-        if identity_role:
-            data["RoleArn"] = identity_role
-
-        # Get storage keys in exchange for JWT
-        response = requests.post(config.get("storage", "sts-endpoint"), data=data)
-        tree = ElementTree.fromstring(response.content)
-        ns = {"s3": "https://sts.amazonaws.com/doc/2011-06-15/"}
-        credentials = tree.find(
-            "./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns
-        )
-
-        return (
-            credentials.find("s3:AccessKeyId", ns).text,
-            credentials.find("s3:SecretAccessKey", ns).text,
-            credentials.find("s3:SessionToken", ns).text,
-        )
 
 
 def get_initial_token(token_url: str, client_id: str, client_secret: str | None = None):
@@ -281,6 +289,7 @@ def get_initial_token(token_url: str, client_id: str, client_secret: str | None 
         pass
 
     # We're also not a BackendApplicationClient, try to do device authorization
+    logging.info("No valid device credentials found. Attempting authorization.")
     response = requests.post(
         os.path.join(config.get("oidc", "endpoint"), "auth", "device"),
         data={"client_id": client_id},
@@ -288,10 +297,13 @@ def get_initial_token(token_url: str, client_id: str, client_secret: str | None 
     body = response.json()
 
     try:
+        logging.info(
+            f"Open {body['verification_uri_complete']} to authorize this device."
+        )
         webbrowser.get()
         webbrowser.open(body["verification_uri_complete"])
     except webbrowser.Error:
-        print(f"Open {body['verification_uri_complete']} to authorize this device.")
+        pass
 
     until_time = time.time() + body["expires_in"]
     while until_time > time.time():
