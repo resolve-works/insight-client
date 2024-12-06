@@ -12,6 +12,7 @@ tqdm = "^4.66.1"
 minio = "^7.2.0"
 requests-oauthlib = "^2.0.0"
 keyring = "^25.5.0"
+pytest = "^8.3.4"
 
 [tool.poetry.scripts]
 insight = "insightclient:cli"

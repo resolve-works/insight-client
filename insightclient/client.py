@@ -11,7 +11,7 @@ from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
 from xml.etree import ElementTree
 from oauthlib.oauth2 import DeviceClient, BackendApplicationClient
-from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
+from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error, TokenExpiredError
 from requests_oauthlib import OAuth2Session
 from enum import Enum
 from urllib.parse import urlparse, urlencode
@@ -33,21 +33,44 @@ class InodeExistsException(Exception):
 
 
 class InsightClient(OAuth2Session):
-    def __init__(self):
-        token_url = os.path.join(config.get("oidc", "endpoint"), "token")
-        token = get_initial_token()
-        set_token(token)
+    token_url = os.path.join(config.get("oidc", "endpoint"), "token")
+    client_id = config.get("oidc", "client-id")
+    client_secret = config.get("oidc", "client-secret", fallback=None)
 
-        super().__init__(
-            client_id=config.get("oidc", "client-id"),
-            token=token,
-            auto_refresh_url=token_url,
-            auto_refresh_kwargs={
-                "client_id": config.get("oidc", "client-id"),
-                "client_secret": config.get("oidc", "client-secret", fallback=None),
-            },
-            token_updater=set_token,
-        )
+    def __init__(self):
+        token = get_initial_token(self.token_url, self.client_id, self.client_secret)
+
+        if "refresh_token" in token:
+            # Remember token as we can use it to refresh next time
+            set_token(token)
+            super().__init__(client_id=self.client_id, token=token)
+        else:
+            super().__init__(client=BackendApplicationClient(client_id=self.client_id))
+
+    def refresh_token(self):
+        if "refresh_token" in self.token:
+            super().refresh_token(
+                self.token_url,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+            set_token(self.token)
+            return self.token
+        else:
+            return super().fetch_token(self.token_url, client_secret=self.client_secret)
+
+    def request(self, method: str, url: str, *args, **kwargs):
+        try:
+            response = super().request(method, url, *args, **kwargs)
+            # When API returns Unauthorized, retry with new token
+            if response.status_code == 401 and url.startswith(
+                config.get("api", "endpoint")
+            ):
+                raise TokenExpiredError()
+            return response
+        except TokenExpiredError:
+            self.refresh_token()
+            return super().request(method, url, *args, **kwargs)
 
     def create_inode(
         self,
@@ -78,14 +101,26 @@ class InsightClient(OAuth2Session):
 
         return response.json()[0]
 
+    def get_inodes(self, parent_id: str | None = None):
+        url = os.path.join(config.get("api", "endpoint"), "inodes")
+        params = {}
+        if parent_id:
+            params["parent_id"] = f"eq.{parent_id}"
+
+        response = self.get(url + "?" + urlencode(params))
+        return response.json()
+
     def get_inode(self, name: str, parent_id: str | None = None):
         url = os.path.join(config.get("api", "endpoint"), "inodes")
         params = {"name": f"eq.{name}"}
         if parent_id:
             params["parent_id"] = f"eq.{parent_id}"
 
-        response = self.get(url + "?" + urlencode(params))
-        return response.json()[0]
+        response = self.get(
+            url + "?" + urlencode(params),
+            headers={"Accept": "application/vnd.pgrst.object+json"},
+        )
+        return response.json()
 
     def delete_inode(self, id: str):
         url = os.path.join(config.get("api", "endpoint"), "inodes")
@@ -224,52 +259,51 @@ class InsightClient(OAuth2Session):
         )
 
 
-def get_initial_token():
-    token_url = os.path.join(config.get("oidc", "endpoint"), "token")
-
+def get_initial_token(token_url: str, client_id: str, client_secret: str | None = None):
+    # Use existing token if it's set
     try:
         token = get_token()
+
         session = OAuth2Session(client_id=config.get("oidc", "client-id"), token=token)
-
-        return session.refresh_token()
+        return session.refresh_token(
+            token_url=token_url, client_id=client_id, client_secret=client_secret
+        )
     except:
-        client_secret = config.get("oidc", "client-secret", fallback=None)
-        client_id = config.get("oidc", "client-id")
+        pass
 
-        if client_secret:
-            session = OAuth2Session(
-                client=BackendApplicationClient(client_id=client_id)
-            )
+    # No token yet, assume we are a BackendApplicationClient
+    try:
+        session = OAuth2Session(client=BackendApplicationClient(client_id=client_id))
+        return session.fetch_token(
+            token_url=token_url, client_id=client_id, client_secret=client_secret
+        )
+    except:
+        pass
 
+    # We're also not a BackendApplicationClient, try to do device authorization
+    response = requests.post(
+        os.path.join(config.get("oidc", "endpoint"), "auth", "device"),
+        data={"client_id": client_id},
+    )
+    body = response.json()
+
+    try:
+        webbrowser.get()
+        webbrowser.open(body["verification_uri_complete"])
+    except webbrowser.Error:
+        print(f"Open {body['verification_uri_complete']} to authorize this device.")
+
+    until_time = time.time() + body["expires_in"]
+    while until_time > time.time():
+        try:
+            session = OAuth2Session(client=DeviceClient(client_id))
             return session.fetch_token(
-                token_url=token_url, client_id=client_id, client_secret=client_secret
+                client_id=client_id,
+                token_url=token_url,
+                device_code=body["device_code"],
             )
-        else:
-            response = requests.post(
-                os.path.join(config.get("oidc", "endpoint"), "auth", "device"),
-                data={"client_id": client_id},
-            )
-            body = response.json()
-
-            try:
-                webbrowser.get()
-                webbrowser.open(body["verification_uri_complete"])
-            except webbrowser.Error:
-                print(
-                    f"Open {body['verification_uri_complete']} to authorize this device."
-                )
-
-            until_time = time.time() + body["expires_in"]
-            while until_time > time.time():
-                try:
-                    session = OAuth2Session(client=DeviceClient(client_id))
-                    return session.fetch_token(
-                        client_id=client_id,
-                        token_url=token_url,
-                        device_code=body["device_code"],
-                    )
-                except CustomOAuth2Error:
-                    time.sleep(body["interval"])
+        except CustomOAuth2Error:
+            time.sleep(body["interval"])
 
 
 def set_token(token):
