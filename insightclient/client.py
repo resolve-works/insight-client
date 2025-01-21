@@ -6,11 +6,10 @@ import base64
 import json
 import keyring
 import logging
-from tqdm import tqdm
-from tqdm.utils import CallbackIOWrapper
 from pathlib import Path
 from xml.etree import ElementTree
-from oauthlib.oauth2 import DeviceClient, BackendApplicationClient
+from oauthlib.oauth2 import BackendApplicationClient
+from oauthlib.oauth2.rfc8628.clients import DeviceClient
 from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error, TokenExpiredError
 from requests_oauthlib import OAuth2Session
 from enum import Enum
@@ -42,7 +41,7 @@ class InsightClient(OAuth2Session):
     def __init__(self):
         token = get_initial_token(self.token_url, self.client_id, self.client_secret)
 
-        if "refresh_token" in token:
+        if token is not None and "refresh_token" in token:
             # Remember token as we can use it to refresh next time
             set_token(token)
             super().__init__(client_id=self.client_id, token=token)
@@ -90,6 +89,8 @@ class InsightClient(OAuth2Session):
         credentials = tree.find(
             "./s3:AssumeRoleWithWebIdentityResult/s3:Credentials", ns
         )
+        if credentials is None:
+            raise Exception("Could not find storage credentials")
 
         self.storage_token = {
             "access_key": credentials.find("s3:AccessKeyId", ns).text,
@@ -148,11 +149,13 @@ class InsightClient(OAuth2Session):
         response = self.get(url + "?" + urlencode(params))
         return response.json()
 
-    def get_inode(self, name: str, parent_id: str | None = None):
+    def get_inode(self, **kwargs):
         url = os.path.join(config.get("api", "endpoint"), "inodes")
-        params = {"name": f"eq.{name}"}
-        if parent_id:
-            params["parent_id"] = f"eq.{parent_id}"
+
+        params = {}
+        for key in ("id", "name", "parent_id"):
+            if key in kwargs and kwargs[key] is not None:
+                params[key] = f"eq.{kwargs[key]}"
 
         response = self.get(
             url + "?" + urlencode(params),
@@ -168,12 +171,17 @@ class InsightClient(OAuth2Session):
             raise Exception(response.json()["message"])
 
     def create_folder(self, name: str, parent_id: str | None = None, is_public=False):
-        try:
-            return self.create_inode(name, InodeType.FOLDER, parent_id, is_public)
-        except InodeExistsException:
-            return self.get_inode(name, parent_id)
+        return self.create_inode(name, InodeType.FOLDER, parent_id, is_public)
 
-    def create_file(
+    def find_or_create_folder(
+        self, name: str, parent_id: str | None = None, is_public=False
+    ):
+        try:
+            return self.create_folder(name, parent_id, is_public)
+        except:
+            return self.get_inode(name=name, parent_id=parent_id)
+
+    def upload_file(
         self,
         name: str,
         size: int,
@@ -181,15 +189,11 @@ class InsightClient(OAuth2Session):
         parent_id: str | None = None,
         is_public=False,
     ):
-        try:
-            # Only upload when inode didn't exist yet
-            inode = self.create_inode(name, InodeType.FILE, parent_id, is_public)
-            self.upload_object(inode["path"], size, reader, is_public)
-            self.mark_file_uploaded(inode["id"])
-
-            return inode
-        except InodeExistsException:
-            return self.get_inode(name, parent_id)
+        # Only upload when inode didn't exist yet
+        inode = self.create_inode(name, InodeType.FILE, parent_id, is_public)
+        self.upload_object(inode["path"], size, reader, is_public)
+        self.mark_file_uploaded(inode["id"])
+        return inode
 
     def mark_file_uploaded(self, id: str):
         # Mark file as uploaded in backend
@@ -200,37 +204,6 @@ class InsightClient(OAuth2Session):
         if response.status_code != 204:
             data = response.json()
             raise Exception(data["message"])
-
-    def process_path(self, path: Path, parent_id: str | None = None, is_public=False):
-        inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
-
-        if inode_type == InodeType.FOLDER:
-            inode = self.create_folder(path.name, parent_id, is_public)
-
-            # Recursively upload files
-            for child_path in os.listdir(path):
-                self.process_path(path / child_path, inode["id"], is_public)
-        else:
-            size = path.stat().st_size
-
-            try:
-                # Only upload when inode didn't exist yet
-                inode = self.create_inode(
-                    path.name, InodeType.FILE, parent_id, is_public
-                )
-
-                logging.info(f"Uploading {path}")
-                with open(path, "rb") as f:
-                    with tqdm(
-                        total=size, unit="iB", unit_scale=True, unit_divisor=1024
-                    ) as t:
-                        reader_wrapper = CallbackIOWrapper(t.update, f, "read")
-                        self.upload_object(
-                            inode["path"], size, reader_wrapper, is_public
-                        )
-                self.mark_file_uploaded(inode["id"])
-            except InodeExistsException:
-                logging.info(f"File exists: {path}")
 
     def get_user_id(self):
         payload = (
@@ -265,6 +238,9 @@ class InsightClient(OAuth2Session):
             tags = Tags.new_object_tags()
             tags["is_public"] = str(is_public)
             minio.set_object_tags(config.get("storage", "bucket"), object_path, tags)
+
+    def download_object(self, path: str):
+        pass
 
 
 def get_initial_token(token_url: str, client_id: str, client_secret: str | None = None):
