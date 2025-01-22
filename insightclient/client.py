@@ -6,6 +6,7 @@ import base64
 import json
 import keyring
 import logging
+import shutil
 from pathlib import Path
 from xml.etree import ElementTree
 from oauthlib.oauth2 import BackendApplicationClient
@@ -47,6 +48,8 @@ class InsightClient(OAuth2Session):
             super().__init__(client_id=self.client_id, token=token)
         else:
             super().__init__(client=BackendApplicationClient(client_id=self.client_id))
+
+        self.refresh_storage_credentials()
 
     def fetch_token(self, *args, **kwargs):
         token = super().fetch_token(*args, **kwargs)
@@ -97,6 +100,17 @@ class InsightClient(OAuth2Session):
             "secret_key": credentials.find("s3:SecretAccessKey", ns).text,
             "session_token": credentials.find("s3:SessionToken", ns).text,
         }
+
+    def get_minio_client(self):
+        url = urlparse(config.get("storage", "endpoint"))
+        return Minio(
+            url.netloc,
+            secure=url.scheme == "https",
+            access_key=self.storage_token["access_key"],
+            secret_key=self.storage_token["secret_key"],
+            session_token=self.storage_token["session_token"],
+            region=config.get("storage", "region", fallback=None),
+        )
 
     def request(self, method: str, url: str, *args, **kwargs):
         try:
@@ -191,7 +205,8 @@ class InsightClient(OAuth2Session):
     ):
         # Only upload when inode didn't exist yet
         inode = self.create_inode(name, InodeType.FILE, parent_id, is_public)
-        self.upload_object(inode["path"], size, reader, is_public)
+        object_path = f"users/{self.get_user_id()}{inode["path"]}"
+        self.upload_object(object_path, size, reader, is_public)
         self.mark_file_uploaded(inode["id"])
         return inode
 
@@ -212,19 +227,10 @@ class InsightClient(OAuth2Session):
         token_data = json.loads(base64.b64decode(payload + "==").decode("utf-8"))
         return token_data["sub"]
 
-    def upload_object(self, path: str, size: int, reader: BinaryIO, is_public=False):
-        # Upload file to storage backend
-        url = urlparse(config.get("storage", "endpoint"))
-        minio = Minio(
-            url.netloc,
-            secure=url.scheme == "https",
-            access_key=self.storage_token["access_key"],
-            secret_key=self.storage_token["secret_key"],
-            session_token=self.storage_token["session_token"],
-            region=config.get("storage", "region", fallback=None),
-        )
-
-        object_path = f"users/{self.get_user_id()}{path}"
+    def upload_object(
+        self, object_path: str, size: int, reader: BinaryIO, is_public=False
+    ):
+        minio = self.get_minio_client()
 
         minio.put_object(
             config.get("storage", "bucket"),
@@ -239,8 +245,18 @@ class InsightClient(OAuth2Session):
             tags["is_public"] = str(is_public)
             minio.set_object_tags(config.get("storage", "bucket"), object_path, tags)
 
-    def download_object(self, path: str):
-        pass
+    def download_object(self, object_path: str, path: Path):
+        minio = self.get_minio_client()
+
+        response = None
+        try:
+            response = minio.get_object(config.get("storage", "bucket"), object_path)
+            with open(path, "wb") as fh:
+                shutil.copyfileobj(response, fh)
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
 
 
 def get_initial_token(token_url: str, client_id: str, client_secret: str | None = None):

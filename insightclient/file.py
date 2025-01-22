@@ -11,7 +11,7 @@ from .client import InsightClient, InodeExistsException, InodeType
 logging.basicConfig(level=logging.INFO)
 
 
-def process_path(
+def upload_path(
     client: InsightClient, path: Path, parent_id: str | None = None, is_public=False
 ):
     inode_type = InodeType.FOLDER if os.path.isdir(path) else InodeType.FILE
@@ -21,7 +21,7 @@ def process_path(
 
         # Recursively upload files
         for child_path in os.listdir(path):
-            process_path(client, path / child_path, inode["id"], is_public)
+            upload_path(client, path / child_path, inode["id"], is_public)
     else:
         size = path.stat().st_size
 
@@ -34,6 +34,37 @@ def process_path(
                     )
                 except InodeExistsException:
                     logging.info(f"File exists: {path}")
+
+
+def download_inode(client: InsightClient, data: dict, path: Path):
+    # Get parent path so we can strip it from inodes path
+    parent_path = "/"
+    if data["parent_id"] is not None:
+        parent = client.get_inode(id=data["parent_id"])
+        parent_path = parent["path"]
+
+    # Get path of inode relative to parent
+    relative_inode_path = data["path"][len(parent_path) :].lstrip("/")
+    path = path / relative_inode_path
+
+    if data["type"] == "file":
+        logging.info(f"Downloading: {path}")
+        # Download file to local disk
+        object_path = f"users/{data["owner_id"]}{data["path"]}"
+        client.download_object(object_path, path)
+    elif data["type"] == "folder":
+        # Check if there's children
+        children = client.get_inodes(parent_id=data["id"])
+
+        # Create folder and download child inodes
+        if len(children) > 0:
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+            for child in children:
+                download_inode(client, child, path)
+    else:
+        raise Exception("Unknown inode type")
 
 
 @click.group()
@@ -57,7 +88,7 @@ def upload(files, is_public):
     client = InsightClient()
     """Ingest PDF files"""
     for path in files:
-        process_path(client, path, is_public=is_public)
+        upload_path(client, path, is_public=is_public)
 
 
 @file.command()
@@ -68,7 +99,7 @@ def download(id, path):
         raise Exception("Path should be a directory")
     client = InsightClient()
     data = client.get_inode(id=id)
-    print(data)
+    download_inode(client, data, path)
 
 
 @file.command()
