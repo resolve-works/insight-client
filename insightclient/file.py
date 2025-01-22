@@ -82,12 +82,12 @@ def list():
 
 
 @file.command()
-@click.argument("files", nargs=-1, type=click.Path(path_type=Path))
+@click.argument("paths", nargs=-1, type=click.Path(path_type=Path))
 @click.option("--is-public", is_flag=True)
-def upload(files, is_public):
+def upload(paths, is_public):
+    """Upload paths recursively"""
     client = InsightClient()
-    """Ingest PDF files"""
-    for path in files:
+    for path in paths:
         upload_path(client, path, is_public=is_public)
 
 
@@ -95,6 +95,7 @@ def upload(files, is_public):
 @click.argument("id")
 @click.argument("path", type=click.Path(path_type=Path))
 def download(id, path):
+    """Download files or folders recursively"""
     if not path.is_dir():
         raise Exception("Path should be a directory")
     client = InsightClient()
