@@ -47,7 +47,9 @@ class InsightClient(OAuth2Session):
             set_token(token)
             super().__init__(client_id=self.client_id, token=token)
         else:
-            super().__init__(client=BackendApplicationClient(client_id=self.client_id))
+            super().__init__(
+                client=BackendApplicationClient(client_id=self.client_id), token=token
+            )
 
         self.refresh_storage_credentials()
 

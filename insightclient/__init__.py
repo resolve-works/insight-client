@@ -44,13 +44,14 @@ def configure(**kwargs):
 
 
 @cli.command()
-def reset():
-    """Remove authentication access token."""
+def logout():
+    """Remove authentication tokens."""
     delete_token()
 
 
 @cli.command()
 def user_info():
+    """Display user info of logged in user."""
     client = InsightClient()
     res = client.get(
         "https://secure.ftm.nl/realms/insight/account",
@@ -61,6 +62,7 @@ def user_info():
 
 @cli.command()
 def user_groups():
+    """List groups of logged in user."""
     client = InsightClient()
     res = client.get(
         "https://secure.ftm.nl/realms/insight/account/groups",
